@@ -15,5 +15,9 @@ REQUIRED_COLS = {
 
 CJK_PATTERN = r"[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]"
 
+df = pd.read_csv(INPUT_PATH, usecols=REQUIRED_COLS)
+
+print(df.head())
+
 
 
