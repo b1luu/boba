@@ -26,7 +26,6 @@ def clean_text_columns(df: pd.DataFrame) -> pd.DataFrame:
         )
     return df
 
-
 df = pd.read_csv(INPUT_PATH, usecols=REQUIRED_COLS)
 
 print(df.head())
