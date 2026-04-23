@@ -1,4 +1,4 @@
-"""Summarize average boba and black tea demand by day of week."""
+"""Write average boba and black tea demand by day of week."""
 
 import argparse
 from pathlib import Path
@@ -20,9 +20,7 @@ DAY_ORDER = [
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Write average boba and black tea demand by day of week."
-    )
+    parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--input",
         default=DEFAULT_INPUT_PATH,
@@ -66,58 +64,51 @@ def main() -> None:
     df["Qty"] = pd.to_numeric(df["Qty"], errors="coerce").fillna(0)
     df = df.dropna(subset=["Date"]).copy()
 
-    item = df["Item"].fillna("").astype(str)
+    item = df["Item"].fillna("").astype(str).str.strip()
     modifiers = df["Modifiers Applied"].fillna("").astype(str)
 
     is_taiwanese_retro = item.str.fullmatch(r"(?i)\s*Taiwanese Retro\s*")
-    black_tea_mask = item.str.contains(r"(?i)\bblack\b", regex=True) | is_taiwanese_retro
+    black_tea_mask = item.str.fullmatch(r"(?i)\s*(Hot\s+)?Signature Black Tea\s*")
+    black_au_lait_mask = item.str.fullmatch(
+        r"(?i)\s*(Hot\s+)?Signature Black Au Lait\s*"
+    )
+    black_milk_tea_mask = item.str.fullmatch(
+        r"(?i)\s*(Hot\s+)?Signature Black Milk Tea\s*"
+    )
 
     modifier_units = modifiers.apply(boba_modifier_units).fillna(0)
-    included_boba_units = is_taiwanese_retro.astype(float)
-    boba_units_per_item = pd.concat(
-        [modifier_units, included_boba_units], axis=1
-    ).max(axis=1)
+    boba_units_per_item = modifier_units + is_taiwanese_retro.astype(float)
     boba_mask = boba_units_per_item.gt(0)
 
     df["day_of_week"] = df["Date"].dt.day_name()
-    df["sale_qty"] = df["Qty"]
-    df["boba_line_item"] = boba_mask.astype(int)
     df["boba_drink_qty"] = df["Qty"].where(boba_mask, 0)
     df["boba_units"] = df["Qty"] * boba_units_per_item
-    df["black_tea_line_item"] = black_tea_mask.astype(int)
-    df["black_tea_qty"] = df["Qty"].where(black_tea_mask, 0)
-    df["taiwanese_retro_qty"] = df["Qty"].where(is_taiwanese_retro, 0)
+    df["black_tea_drinks"] = df["Qty"].where(black_tea_mask, 0)
+    df["black_au_lait_drinks"] = df["Qty"].where(black_au_lait_mask, 0)
+    df["black_milk_tea_drinks"] = df["Qty"].where(black_milk_tea_mask, 0)
+    df["taiwanese_retro_drinks"] = df["Qty"].where(is_taiwanese_retro, 0)
 
     daily = (
         df.groupby(["Date", "day_of_week"], as_index=False)
         .agg(
-            total_line_items=("Item", "size"),
-            total_qty=("sale_qty", "sum"),
-            boba_line_items=("boba_line_item", "sum"),
             boba_drink_qty=("boba_drink_qty", "sum"),
             boba_units=("boba_units", "sum"),
-            black_tea_line_items=("black_tea_line_item", "sum"),
-            black_tea_qty=("black_tea_qty", "sum"),
-            taiwanese_retro_qty=("taiwanese_retro_qty", "sum"),
+            black_tea_drinks=("black_tea_drinks", "sum"),
+            black_au_lait_drinks=("black_au_lait_drinks", "sum"),
+            black_milk_tea_drinks=("black_milk_tea_drinks", "sum"),
+            taiwanese_retro_drinks=("taiwanese_retro_drinks", "sum"),
         )
     )
 
     summary = (
         daily.groupby("day_of_week", as_index=False)
         .agg(
-            dates_count=("Date", "nunique"),
-            total_qty=("total_qty", "sum"),
-            avg_total_qty_per_day=("total_qty", "mean"),
-            boba_drink_qty=("boba_drink_qty", "sum"),
             avg_boba_drink_qty_per_day=("boba_drink_qty", "mean"),
-            boba_units=("boba_units", "sum"),
             avg_boba_units_per_day=("boba_units", "mean"),
-            black_tea_qty=("black_tea_qty", "sum"),
-            avg_black_tea_qty_per_day=("black_tea_qty", "mean"),
-            taiwanese_retro_qty=("taiwanese_retro_qty", "sum"),
-            avg_taiwanese_retro_qty_per_day=("taiwanese_retro_qty", "mean"),
-            boba_line_items=("boba_line_items", "sum"),
-            black_tea_line_items=("black_tea_line_items", "sum"),
+            avg_black_tea_drinks_per_day=("black_tea_drinks", "mean"),
+            avg_black_au_lait_drinks_per_day=("black_au_lait_drinks", "mean"),
+            avg_black_milk_tea_drinks_per_day=("black_milk_tea_drinks", "mean"),
+            avg_taiwanese_retro_drinks_per_day=("taiwanese_retro_drinks", "mean"),
         )
     )
 
