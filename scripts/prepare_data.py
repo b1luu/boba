@@ -1,34 +1,174 @@
+"""Clean raw Square export data for demand analysis."""
+
+import argparse
 from pathlib import Path
+
 import pandas as pd
 
-INPUT_PATH = "data/raw/raw.csv" 
-OUTPUT_PATH = "data/raw/clean.csv"
+INPUT_PATH = "data/raw/raw.csv"
+OUTPUT_PATH = "data/clean/clean.csv"
 
-REQUIRED_COLS = {
+REQUIRED_COLS = [
     "Date",
     "Category",
     "Item",
     "Qty",
     "Modifiers Applied",
     "Net Sales",
-}
+]
+
+OPTIONAL_COLS = [
+    "Time",
+]
 
 CJK_PATTERN = r"[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]"
+FREE_DRINK_ITEM = "Free Drink (100☼ Reward)"
+FIXED_ICE_ITEMS = {
+    "Matcha Latte",
+    "Strawberry Matcha Latte",
+    "Mango Matcha Latte",
+    "Chestnut Forest",
+}
+
 
 def clean_text_columns(df: pd.DataFrame) -> pd.DataFrame:
     for col in ["Category", "Item"]:
         df[col] = (
-            df[col
+            df[col]
             .fillna("")
-            .str.replace(CJK_PATTERN, "",regex=True)
-            .str.replace(r"\s+", " ",regrex=True)]
+            .str.replace(CJK_PATTERN, "", regex=True)
+            .str.replace(r"\s+", " ", regex=True)
             .str.strip()
         )
     return df
 
-df = pd.read_csv(INPUT_PATH, usecols=REQUIRED_COLS)
 
-print(df.head())
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Clean Square export CSV data.")
+    parser.add_argument(
+        "--input",
+        default=INPUT_PATH,
+        help=f"Input raw CSV path (default: {INPUT_PATH})",
+    )
+    parser.add_argument(
+        "--output",
+        default=OUTPUT_PATH,
+        help=f"Output cleaned CSV path (default: {OUTPUT_PATH})",
+    )
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    header = pd.read_csv(args.input, nrows=0, low_memory=False).columns.tolist()
+    missing_required = [c for c in REQUIRED_COLS if c not in header]
+    if missing_required:
+        raise ValueError(f"Missing required columns: {missing_required}")
+    usecols = [c for c in REQUIRED_COLS + OPTIONAL_COLS if c in header]
+    clean = pd.read_csv(
+        args.input,
+        usecols=usecols,
+        low_memory=False,
+    )
+
+    # Normalize key types early.
+    clean["Date"] = pd.to_datetime(clean["Date"], errors="coerce")
+    clean["Qty"] = pd.to_numeric(clean["Qty"], errors="coerce")
+    clean["Net Sales"] = pd.to_numeric(
+        clean["Net Sales"].astype(str).str.replace(r"[$,]", "", regex=True),
+        errors="coerce",
+    )
+    clean = clean.dropna(subset=["Date", "Qty", "Net Sales"]).copy()
+
+    # Normalize text fields.
+    clean = clean_text_columns(clean)
+
+    # Keep positive sale rows using Qty and Net Sales, without depending on Event Type.
+    is_refund = (clean["Qty"] < 0) | (clean["Net Sales"] < 0)
+    is_sale = (clean["Qty"] > 0) & (clean["Net Sales"] >= 0)
+
+    print("Sale rows:", int(is_sale.sum()))
+    print("Refund rows:", int(is_refund.sum()))
+    print("Sale Qty sum:", float(clean.loc[is_sale, "Qty"].sum()))
+    print("Refund Qty sum:", float(clean.loc[is_refund, "Qty"].sum()))
+    print("Net Sales total:", round(float(clean.loc[is_sale, "Net Sales"].sum()), 2))
+
+    clean = clean.loc[is_sale].copy()
+
+    non_product_mask = clean["Item"].fillna("").str.fullmatch(
+        r"(?i)tip|custom amount"
+    )
+    print("Removing tip/custom rows:", int(non_product_mask.sum()))
+    clean = clean.loc[~non_product_mask].copy()
+    clean = clean[clean["Category"].fillna("").str.strip().ne("")].copy()
+
+    # Remove free-drink rewards.
+    reward_mask = clean["Item"].fillna("").eq(FREE_DRINK_ITEM)
+    redeemed_rows = int(reward_mask.sum())
+    redeemed_qty = float(clean.loc[reward_mask, "Qty"].sum())
+
+    print("Free drink redemption rows:", redeemed_rows)
+    print("Free drinks redeemed (Qty):", redeemed_qty)
+
+    clean = clean.loc[~reward_mask].copy()
+
+    # Remove merchandise rows.
+    merch_mask = clean["Category"].fillna("").eq("Merchandise")
+    print("Removing merchandise rows:", int(merch_mask.sum()))
+    clean = clean.loc[~merch_mask].copy()
+
+    # Parse modifiers into numeric percentages.
+    mods = clean["Modifiers Applied"].fillna("").astype(str).str.strip()
+    clean["ice_pct"] = pd.to_numeric(
+        mods.str.extract(r"(?i)\b(\d{1,3})\s*%\s*ice\b")[0],
+        errors="coerce",
+    )
+    clean["sugar_pct"] = pd.to_numeric(
+        mods.str.extract(r"(?i)\b(\d{1,3})\s*%\s*sugar\b")[0],
+        errors="coerce",
+    )
+    clean.loc[mods.str.contains(r"(?i)\bno\s*ice\b", regex=True), "ice_pct"] = 0
+    clean.loc[mods.str.contains(r"(?i)\bno\s*sugar\b", regex=True), "sugar_pct"] = 0
+
+    # Hot drinks missing an explicit ice token should default to No Ice.
+    hot_mask = (
+        clean["Category"].fillna("").str.contains(r"(?i)\bhot\b", regex=True)
+        | clean["Item"].fillna("").str.contains(r"(?i)^hot\b", regex=True)
+    )
+    has_ice_token = mods.str.contains(r"(?i)\b(?:no\s*ice|\d{1,3}\s*%\s*ice)\b", regex=True)
+    add_no_ice_mask = hot_mask & ~has_ice_token
+
+    clean.loc[add_no_ice_mask, "Modifiers Applied"] = mods[add_no_ice_mask].apply(
+        lambda x: "No Ice" if x == "" else f"{x}, No Ice"
+    )
+    clean.loc[add_no_ice_mask, "ice_pct"] = 0
+
+    # Fixed-ice drinks default to 100% Ice if missing.
+    fixed_ice_mask = clean["Item"].isin(FIXED_ICE_ITEMS) & clean["ice_pct"].isna()
+    clean.loc[fixed_ice_mask, "ice_pct"] = 100
+
+    no_ice_token_mask = ~clean["Modifiers Applied"].fillna("").str.contains(
+        r"(?i)\b(?:no\s*ice|\d{1,3}\s*%\s*ice)\b", regex=True
+    )
+    mods_fix_mask = fixed_ice_mask & no_ice_token_mask
+    clean.loc[mods_fix_mask, "Modifiers Applied"] = (
+        clean.loc[mods_fix_mask, "Modifiers Applied"]
+        .fillna("")
+        .str.strip()
+        .apply(lambda x: "100% Ice" if x == "" else f"{x}, 100% Ice")
+    )
+
+    clean["ice_pct"] = clean["ice_pct"].astype("Int64")
+    clean["sugar_pct"] = clean["sugar_pct"].astype("Int64")
+
+    print("Fixed 100% ice rows:", int(fixed_ice_mask.sum()))
+    
+    output_path = Path(args.output)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    clean.to_csv(output_path, index=False)
+    print(f"Wrote cleaned file: {output_path}")
 
 
 
+if __name__ == "__main__":
+    main()
