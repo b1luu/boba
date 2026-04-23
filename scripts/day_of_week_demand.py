@@ -31,6 +31,18 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_OUTPUT_PATH,
         help=f"Output CSV path (default: {DEFAULT_OUTPUT_PATH})",
     )
+    parser.add_argument(
+        "--lookback-months",
+        type=int,
+        default=None,
+        help="Only include rows from the past N months, anchored to the latest date in the input.",
+    )
+    parser.add_argument(
+        "--stat",
+        choices=["mean", "median"],
+        default="mean",
+        help="Daily statistic to calculate per weekday: mean or median (default: mean).",
+    )
     return parser.parse_args()
 
 
@@ -64,6 +76,17 @@ def main() -> None:
     df["Qty"] = pd.to_numeric(df["Qty"], errors="coerce").fillna(0)
     df = df.dropna(subset=["Date"]).copy()
 
+    if args.lookback_months is not None:
+        if args.lookback_months <= 0:
+            raise ValueError("--lookback-months must be greater than 0")
+        latest_date = df["Date"].max()
+        start_date = latest_date - pd.DateOffset(months=args.lookback_months)
+        df = df.loc[df["Date"] >= start_date].copy()
+        if df.empty:
+            raise ValueError(
+                f"No rows found in the past {args.lookback_months} month(s)"
+            )
+
     item = df["Item"].fillna("").astype(str).str.strip()
     modifiers = df["Modifiers Applied"].fillna("").astype(str)
 
@@ -87,6 +110,12 @@ def main() -> None:
     df["black_au_lait_drinks"] = df["Qty"].where(black_au_lait_mask, 0)
     df["black_milk_tea_drinks"] = df["Qty"].where(black_milk_tea_mask, 0)
     df["taiwanese_retro_drinks"] = df["Qty"].where(is_taiwanese_retro, 0)
+    df["au_lait_taiwanese_retro_drinks"] = (
+        df["black_au_lait_drinks"] + df["taiwanese_retro_drinks"]
+    )
+    df["black_tea_black_milk_tea_drinks"] = (
+        df["black_tea_drinks"] + df["black_milk_tea_drinks"]
+    )
 
     daily = (
         df.groupby(["Date", "day_of_week"], as_index=False)
@@ -97,19 +126,50 @@ def main() -> None:
             black_au_lait_drinks=("black_au_lait_drinks", "sum"),
             black_milk_tea_drinks=("black_milk_tea_drinks", "sum"),
             taiwanese_retro_drinks=("taiwanese_retro_drinks", "sum"),
+            au_lait_taiwanese_retro_drinks=(
+                "au_lait_taiwanese_retro_drinks",
+                "sum",
+            ),
+            black_tea_black_milk_tea_drinks=(
+                "black_tea_black_milk_tea_drinks",
+                "sum",
+            ),
         )
     )
 
-    summary = (
-        daily.groupby("day_of_week", as_index=False)
-        .agg(
-            avg_boba_drink_qty_per_day=("boba_drink_qty", "mean"),
-            avg_boba_units_per_day=("boba_units", "mean"),
-            avg_black_tea_drinks_per_day=("black_tea_drinks", "mean"),
-            avg_black_au_lait_drinks_per_day=("black_au_lait_drinks", "mean"),
-            avg_black_milk_tea_drinks_per_day=("black_milk_tea_drinks", "mean"),
-            avg_taiwanese_retro_drinks_per_day=("taiwanese_retro_drinks", "mean"),
-        )
+    stat_prefix = "avg" if args.stat == "mean" else "median"
+    summary = daily.groupby("day_of_week", as_index=False).agg(
+        **{
+            f"{stat_prefix}_boba_drink_qty_per_day": (
+                "boba_drink_qty",
+                args.stat,
+            ),
+            f"{stat_prefix}_boba_units_per_day": ("boba_units", args.stat),
+            f"{stat_prefix}_black_tea_drinks_per_day": (
+                "black_tea_drinks",
+                args.stat,
+            ),
+            f"{stat_prefix}_black_au_lait_drinks_per_day": (
+                "black_au_lait_drinks",
+                args.stat,
+            ),
+            f"{stat_prefix}_black_milk_tea_drinks_per_day": (
+                "black_milk_tea_drinks",
+                args.stat,
+            ),
+            f"{stat_prefix}_taiwanese_retro_drinks_per_day": (
+                "taiwanese_retro_drinks",
+                args.stat,
+            ),
+            f"{stat_prefix}_au_lait_taiwanese_retro_drinks_per_day": (
+                "au_lait_taiwanese_retro_drinks",
+                args.stat,
+            ),
+            f"{stat_prefix}_black_tea_black_milk_tea_drinks_per_day": (
+                "black_tea_black_milk_tea_drinks",
+                args.stat,
+            ),
+        }
     )
 
     summary["day_of_week"] = pd.Categorical(
@@ -125,6 +185,12 @@ def main() -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     summary.to_csv(output_path, index=False)
     print(f"Wrote weekday demand summary: {output_path}")
+    print(
+        "Date range:",
+        df["Date"].min().date(),
+        "to",
+        df["Date"].max().date(),
+    )
     print(summary.to_string(index=False))
 
 
