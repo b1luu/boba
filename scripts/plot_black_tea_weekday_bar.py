@@ -1,4 +1,4 @@
-"""Create a weekday bar chart for average drinks sold that included black tea."""
+"""Create a donut chart for the average weekday mix of black tea family drinks."""
 
 import argparse
 from pathlib import Path
@@ -7,6 +7,18 @@ import pandas as pd
 
 
 DAY_ORDER = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
+DRINK_ORDER = [
+    "Signature Black Tea",
+    "Signature Black Milk Tea",
+    "Signature Black Au Lait",
+    "Taiwanese Retro",
+]
+DRINK_COLORS = {
+    "Signature Black Tea": "#7c2d12",
+    "Signature Black Milk Tea": "#c2410c",
+    "Signature Black Au Lait": "#d6a663",
+    "Taiwanese Retro": "#3f6212",
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -45,69 +57,118 @@ def main() -> None:
     item = df["Item"].fillna("").astype(str).str.strip()
     df["Day of Week"] = df["Date"].dt.day_name()
 
+    black_milk_tea_mask = item.str.fullmatch(
+        r"(?i)\s*(Hot\s+)?Signature Black Milk Tea\s*"
+    )
     black_tea_mask = item.str.fullmatch(r"(?i)\s*(Hot\s+)?Signature Black Tea\s*")
     black_au_lait_mask = item.str.fullmatch(
         r"(?i)\s*(Hot\s+)?Signature Black Au Lait\s*"
     )
-    black_milk_tea_mask = item.str.fullmatch(
-        r"(?i)\s*(Hot\s+)?Signature Black Milk Tea\s*"
-    )
     taiwanese_retro_mask = item.str.fullmatch(r"(?i)\s*Taiwanese Retro\s*")
-    black_tea_family_mask = (
-        black_tea_mask
-        | black_au_lait_mask
-        | black_milk_tea_mask
-        | taiwanese_retro_mask
-    )
-
-    df["Black Tea Family Drinks"] = df["Qty"].where(black_tea_family_mask, 0)
 
     daily = (
         df.groupby(["Date", "Day of Week"], as_index=False)
-        .agg(**{"Black Tea Family Drinks": ("Black Tea Family Drinks", "sum")})
-    )
-
-    summary = (
-        daily[daily["Day of Week"].isin(DAY_ORDER)]
-        .groupby("Day of Week", as_index=False)
         .agg(
             **{
-                "Average Drinks Sold that Included Black Tea": (
-                    "Black Tea Family Drinks",
-                    "mean",
+                "Signature Black Tea": ("Qty", lambda s: s[black_tea_mask.loc[s.index]].sum()),
+                "Signature Black Milk Tea": (
+                    "Qty",
+                    lambda s: s[black_milk_tea_mask.loc[s.index]].sum(),
                 ),
-                "Days Observed": ("Date", "nunique"),
+                "Signature Black Au Lait": (
+                    "Qty",
+                    lambda s: s[black_au_lait_mask.loc[s.index]].sum(),
+                ),
+                "Taiwanese Retro": (
+                    "Qty",
+                    lambda s: s[taiwanese_retro_mask.loc[s.index]].sum(),
+                ),
             }
         )
     )
-    summary["Day of Week"] = pd.Categorical(
-        summary["Day of Week"], categories=DAY_ORDER, ordered=True
+
+    weekday_daily = daily[daily["Day of Week"].isin(DAY_ORDER)].copy()
+    if weekday_daily.empty:
+        raise ValueError("No weekday rows found for the black tea family chart")
+
+    average_mix = (
+        weekday_daily[DRINK_ORDER]
+        .mean()
+        .rename_axis("Drink")
+        .reset_index(name="Average Drinks Sold per Weekday")
     )
-    summary = summary.sort_values("Day of Week").reset_index(drop=True)
-    summary["Average Drinks Sold that Included Black Tea"] = (
-        summary["Average Drinks Sold that Included Black Tea"].round(2)
+    total_average = average_mix["Average Drinks Sold per Weekday"].sum()
+    average_mix["Fraction of Black Tea Family Drinks"] = (
+        average_mix["Average Drinks Sold per Weekday"] / total_average
     )
+    average_mix["Share Label"] = average_mix["Fraction of Black Tea Family Drinks"].map(
+        lambda value: f"{value:.1%}"
+    )
+    average_mix["Average Drinks Sold per Weekday"] = (
+        average_mix["Average Drinks Sold per Weekday"].round(2)
+    )
+    average_mix["Fraction of Black Tea Family Drinks"] = (
+        average_mix["Fraction of Black Tea Family Drinks"].round(4)
+    )
+    average_mix["Weekday Dates Observed"] = weekday_daily["Date"].nunique()
 
     output_png.parent.mkdir(parents=True, exist_ok=True)
     output_csv.parent.mkdir(parents=True, exist_ok=True)
-    summary.to_csv(output_csv, index=False)
+    average_mix.to_csv(output_csv, index=False)
 
     plt.style.use("seaborn-v0_8-whitegrid")
-    fig, ax = plt.subplots(figsize=(10, 5.8))
-    values = summary["Average Drinks Sold that Included Black Tea"]
-    ax.bar(summary["Day of Week"].astype(str), values, color="#1f7a6f", width=0.65)
-    ax.set_title("Average Drinks Sold that Included Black Tea", fontsize=18, weight="bold")
-    ax.set_xlabel("Day of Week")
-    ax.set_ylabel("Average Drinks Sold")
-    for idx, value in enumerate(values):
-        ax.text(idx, value + 0.15, f"{value:.2f}", ha="center", va="bottom", fontsize=10)
+    fig, ax = plt.subplots(figsize=(10, 6.4))
+    values = average_mix["Average Drinks Sold per Weekday"]
+    colors = [DRINK_COLORS[drink] for drink in average_mix["Drink"]]
+
+    wedges, _, autotexts = ax.pie(
+        values,
+        labels=average_mix["Drink"],
+        colors=colors,
+        startangle=90,
+        counterclock=False,
+        wedgeprops={"width": 0.42, "edgecolor": "white", "linewidth": 2},
+        autopct=lambda pct: f"{pct:.1f}%",
+        pctdistance=0.82,
+        labeldistance=1.08,
+    )
+    for autotext in autotexts:
+        autotext.set_color("white")
+        autotext.set_fontsize(11)
+        autotext.set_weight("bold")
+
+    ax.text(
+        0,
+        0.06,
+        "Avg weekday\nblack tea drinks",
+        ha="center",
+        va="center",
+        fontsize=11,
+        color="#374151",
+    )
+    ax.text(
+        0,
+        -0.16,
+        f"{total_average:.2f}",
+        ha="center",
+        va="center",
+        fontsize=20,
+        fontweight="bold",
+        color="#111827",
+    )
+    ax.set_title(
+        "Average Drinks Sold that Included Black Tea\nWeekday Mix by Drink",
+        fontsize=18,
+        weight="bold",
+    )
+    ax.axis("equal")
     fig.tight_layout()
     fig.savefig(output_png, dpi=200, bbox_inches="tight")
     plt.close(fig)
 
     print(f"Wrote summary CSV: {output_csv}")
-    print(f"Wrote bar chart PNG: {output_png}")
-    print(summary.to_string(index=False))
+    print(f"Wrote donut chart PNG: {output_png}")
+    print(average_mix.to_string(index=False))
 
 
 if __name__ == "__main__":
